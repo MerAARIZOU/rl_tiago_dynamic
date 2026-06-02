@@ -6,6 +6,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 import random
+import time
 
 from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
@@ -16,21 +17,23 @@ from gazebo_tools import GazeboTools
 class TiagoEnv(gym.Env, Node):
     def __init__(self):
         super().__init__('tiago_gym_env')
-        
-        # 1. Espaces (20 LiDAR + 1 Dist + 2 Angle = 23)
+
+        self.max_episode_steps = 250  
+        self.current_step = 0
+        # Action space et Observation space
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         self.observation_space = spaces.Box(low=-1.0, high=10.0, shape=(23,), dtype=np.float32)
         
-        # 2. Variables d'état
+        # Variables d'état
         self.robot_pos = np.array([0.0, 0.0])
         self.robot_yaw = 0.0
         self.target_pos = np.array([0.0, 0.0])
         self.prev_dist = 0.0
-        self.last_scan = np.zeros(20, dtype=np.float32)
+        self.last_scan = np.ones(20, dtype=np.float32) * 10.0
         self.last_action = np.array([0.0, 0.0])
         self.collided = False
         
-        # 3. ROS 2 Interfaces (Retour à l'odométrie native stable)
+        # ROS 2 Interfaces
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.odom_sub = self.create_subscription(Odometry, '/mobile_base_controller/odom', self._odom_callback, 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan_raw', self._scan_callback, 10)
@@ -40,6 +43,7 @@ class TiagoEnv(gym.Env, Node):
 
     def _scan_callback(self, msg):
         ranges = np.array(msg.ranges)
+        # Nettoyage des valeurs aberrantes du LiDAR
         ranges = np.nan_to_num(ranges, nan=10.0, posinf=10.0, neginf=0.05)
         sectors = np.array_split(ranges, 20)
         self.last_scan = np.array([np.min(s) for s in sectors], dtype=np.float32)
@@ -51,48 +55,85 @@ class TiagoEnv(gym.Env, Node):
         self.robot_yaw = float(np.arctan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z)))
 
     def _get_obs(self):
+        # On calcule la vraie distance non modifiée
         current_dist = float(np.linalg.norm(self.target_pos - self.robot_pos))
         angle_to_target = np.arctan2(self.target_pos[1] - self.robot_pos[1], self.target_pos[0] - self.robot_pos[0])
         angle_error = float(np.arctan2(np.sin(angle_to_target - self.robot_yaw), np.cos(angle_to_target - self.robot_yaw)))
         
         state = np.zeros(23, dtype=np.float32)
         state[0:20] = np.clip(self.last_scan / 10.0, 0.0, 1.0)
-        state[20] = np.clip(current_dist / 4.0, 0.0, 1.0)
+        
+        # CORRECTION : On stocke la vraie valeur brute non écrêtée pour éviter de masquer la distance
+        state[20] = current_dist 
         state[21] = np.sin(angle_error)
         state[22] = np.cos(angle_error)
         return state
 
     def step(self, action):
+        self.current_step += 1  # Incrément du compteur de pas
         self.last_action = action
+        
         msg = Twist()
-        msg.linear.x = float((action[0] + 1.0) * 0.25)
+        msg.linear.x = float((action[0] + 1.0) * 0.2) 
         msg.angular.z = float(action[1] * 1.0)
+        
         self.cmd_vel_pub.publish(msg)
         
-        rclpy.spin_once(self, timeout_sec=0.1)
+        start_time = time.time()
+        while time.time() - start_time < 0.1:
+            rclpy.spin_once(self, timeout_sec=0.01)
         
         obs = self._get_obs()
-        reward, done, info = self._calculate_reward(obs[20] * 4.0, np.arctan2(obs[21], obs[22]))
-        self.prev_dist = obs[20] * 4.0
+        current_dist = obs[20]
+        angle_error = np.arctan2(obs[21], obs[22])
         
-        return obs, reward, done, False, info
+        reward, done, info = self._calculate_reward(current_dist, angle_error)
+        self.prev_dist = current_dist
+        
+        obs_normalized = obs.copy()
+        obs_normalized[20] = np.clip(current_dist / 10.0, 0.0, 1.0)
+        
+        # CORRECTION : Si le temps imparti est écoulé, on coupe l'épisode (truncated = True)
+        truncated = False
+        if self.current_step >= self.max_episode_steps:
+            truncated = True
+        
+        return obs_normalized, reward, done, truncated, info
 
     def _calculate_reward(self, current_dist, angle_error):
-        reward_dist = (self.prev_dist - current_dist) * 30.0
-        reward_align = -abs(angle_error) * 1.5
-        reward_forward = (self.last_action[0] * 2.0) if (abs(angle_error) < 0.2 and self.last_action[0] > 0.0) else 0.0
-        penalite_cercle = -2.0 if (abs(self.last_action[1]) > 0.3 and self.last_action[0] > 0.1) else 0.0
+        # 1. Gain de progression lié à la distance
+        reward_dist = (self.prev_dist - current_dist) * 50.0
         
-        reward = reward_dist + reward_align + reward_forward + penalite_cercle - 0.05
+        # 2. Alignement vers la cible
+        reward_align = -abs(angle_error) * 1.0
+        
+        # 3. Pénalité de rotation continue : on pénalise l'action de tourner (action[1])
+        # pour forcer des trajectoires fluides et rectilignes.
+        reward_rotation_pure = -0.5 * abs(self.last_action[1])
+        
+        # 4. BONUS de vitesse linéaire contrôlé :
+        vitesse_lineaire = (self.last_action[0] + 1.0) * 0.2
+        reward_forward = 0.0
+        
+        # CRUCIAL : On accorde le bonus UNIQUEMENT si le robot est aligné ET qu'il ne tourne pas sur lui-même !
+        if abs(angle_error) < 0.3 and abs(self.last_action[1]) < 0.2 and vitesse_lineaire > 0.05:
+            reward_forward = vitesse_lineaire * 5.0  # Encourage à foncer droit vers la cible
+            
+        # Malus temporel fixe
+        reward = reward_dist + reward_align + reward_forward + reward_rotation_pure - 0.1
+        
         done = False
         
-        if np.min(self.last_scan) <= 0.25:
-            reward -= 100.0
+        # 5. Conditions d'arrêt physiques
+        if np.min(self.last_scan) <= 0.32:
+            reward -= 50.0
             done = True
             self.collided = True
-        elif current_dist < 0.45:
+            
+        elif current_dist < 0.50:
             reward += 200.0
             done = True
+            self.get_logger().info("CIBLE ATTEINTE !")
             
         return float(reward), done, {}
 
@@ -112,13 +153,14 @@ class TiagoEnv(gym.Env, Node):
         
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
+
+        self.current_step = 0        
         if self.collided:
             self.get_logger().info("Séquence de dégagement : Recul -> Rotation -> Avance")
-            self._apply_movement(-0.25, 0.0, duration=1.0)
+            self._apply_movement(-0.25, 0.0, duration=1.2)
             rotation_dir = random.choice([-1.0, 1.0])
-            self._apply_movement(0.0, rotation_dir * 0.8, duration=1.0)
-            self._apply_movement(0.20, 0.0, duration=0.5)
+            self._apply_movement(0.0, rotation_dir * 1.0, duration=1.0)
+            self._apply_movement(0.20, 0.0, duration=0.6)
             self.collided = False
 
         while self.target_validator.map_grid is None:
@@ -127,9 +169,16 @@ class TiagoEnv(gym.Env, Node):
         tx, ty = self.target_validator.generate_valid_target()
         self.target_pos = np.array([tx, ty], dtype=np.float32)
         
-        # Rétablissement de l'outil Gazebo d'origine pour placer le modèle physique
         self.gazebo_tools.update_gazebo_target_marker(tx, ty)
         
+        # Lancement de quelques spins pour mettre à jour la position initiale du robot après téléportation de la cible
+        for _ in range(5):
+            rclpy.spin_once(self, timeout_sec=0.02)
+            
         self.prev_dist = float(np.linalg.norm(self.target_pos - self.robot_pos))
         
-        return self._get_obs(), {}
+        obs = self._get_obs()
+        obs_normalized = obs.copy()
+        obs_normalized[20] = np.clip(self.prev_dist / 10.0, 0.0, 1.0)
+        
+        return obs_normalized, {}

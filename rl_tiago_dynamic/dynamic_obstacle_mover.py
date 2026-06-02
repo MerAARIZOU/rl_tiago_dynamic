@@ -9,7 +9,6 @@ class DynamicObstacleMover(Node):
     def __init__(self):
         super().__init__('dynamic_obstacle_mover')
         
-        # CORRECTION : On s'aligne sur le nom de l'instance de simulation lancée par le launch.py
         self.srv_name = '/world/house_dynamic/set_pose'
         self.client = self.create_client(SetEntityPose, self.srv_name)
         self.obstacle_name = 'obstacle_cylindre'
@@ -29,7 +28,6 @@ class DynamicObstacleMover(Node):
         self.counter += 0.03
         req = SetEntityPose.Request()
         
-        # STRUCTURE DE REQUÊTE STANDARD ET DIRECTE
         req.entity.name = self.obstacle_name
         req.entity.type = 2  # Type Model
         

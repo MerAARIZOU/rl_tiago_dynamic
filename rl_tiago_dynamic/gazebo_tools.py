@@ -21,13 +21,13 @@ class GazeboTools:
         """Met à jour la position du marqueur simultanément sur RViz et Gazebo"""
         
         # --- ÉTAPE A : Gestion du modèle physique dans Gazebo (Premier Spawn) ---
-        if not self.has_spawned_marker:
+        '''if not self.has_spawned_marker:
             if os.path.exists(self.urdf_path):
                 # On fait apparaître le modèle une première fois
                 cmd = f"ros2 run ros_gz_sim create -file {self.urdf_path} -name target_marker -x {x} -y {y} -z 0.15"
                 subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.has_spawned_marker = True
-                self.node.get_logger().info("Marqueur initialisé dans Gazebo Sim.")
+                self.node.get_logger().info("Marqueur initialisé dans Gazebo Sim.")'''
         
         # --- ÉTAPE B : Publication du message de mise à jour (RViz + Gazebo via Bridge) ---
         marker = Marker()
