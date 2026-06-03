@@ -66,4 +66,14 @@ def generate_launch_description():
                 {'node_names': ['map_server']}
             ]
         ),
+
+        # 5. Publication du TF statique entre map et odom (alignement à 0,0)
+        Node(
+            package='tf2_ros',
+            executable='static_transform_publisher',
+            name='static_tf_pub_map_to_odom',
+            arguments=['0', '0', '0', '0', '0', '0', 'map', 'odom'],
+            parameters=[{'use_sim_time': True}],
+            output='screen'
+        ),
     ])

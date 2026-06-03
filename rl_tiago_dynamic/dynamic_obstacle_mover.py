@@ -4,6 +4,7 @@ import rclpy
 from rclpy.node import Node
 import math
 from ros_gz_interfaces.srv import SetEntityPose 
+from ros_gz_interfaces.msg import Entity  # Import pour utiliser les constantes de type
 
 class DynamicObstacleMover(Node):
     def __init__(self):
@@ -13,6 +14,9 @@ class DynamicObstacleMover(Node):
         self.client = self.create_client(SetEntityPose, self.srv_name)
         self.obstacle_name = 'obstacle_cylindre'
         self.counter = 0.0
+        
+        # Variable pour suivre l'état de la requête asynchrone précédente
+        self.current_future = None
         
         self.timer_init = self.create_timer(1.0, self._check_service_connection)
 
@@ -25,18 +29,24 @@ class DynamicObstacleMover(Node):
             self.get_logger().warn(f"En attente du service {self.srv_name}...")
 
     def _move_obstacle_callback(self):
+        # SÉCURITÉ : Si la requête précédente n'est pas encore terminée, 
+        # on saute ce cycle pour ne pas surcharger Gazebo et ROS 2.
+        if self.current_future is not None and not self.current_future.done():
+            return
+            
         self.counter += 0.03
         req = SetEntityPose.Request()
         
         req.entity.name = self.obstacle_name
-        req.entity.type = 2  # Type Model
+        req.entity.type = Entity.MODEL  # Utilisation de la constante propre (vaut 2)
         
         req.pose.position.x = 1.8
         req.pose.position.y = 0.0 + math.sin(self.counter) * 1.5
         req.pose.position.z = 0.5
         req.pose.orientation.w = 1.0
         
-        self.client.call_async(req)
+        # On stocke le future pour le cycle suivant
+        self.current_future = self.client.call_async(req)
 
 def main(args=None):
     rclpy.init(args=args)
